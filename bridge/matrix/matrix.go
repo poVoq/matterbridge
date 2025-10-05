@@ -9,6 +9,11 @@ import (
 	"sync"
 	"time"
 
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
+	_ "image/gif"
+
 	"github.com/42wim/matterbridge/bridge"
 	"github.com/42wim/matterbridge/bridge/config"
 	"github.com/42wim/matterbridge/bridge/helper"
@@ -432,8 +437,13 @@ func (b *Bmatrix) handleEdit(ev *matrix.Event, rmsg config.Message) bool {
 		return false
 	}
 
+	if b.GetBool("EditDisable") {
+		return true
+	}
+
 	rmsg.ID = relation.EventID
 	rmsg.Text = newContent.Body
+	rmsg.Text += b.GetString("EditSuffix")
 	b.Remote <- rmsg
 
 	return true
@@ -569,7 +579,8 @@ func (b *Bmatrix) handleDownloadFile(rmsg *config.Message, content map[string]in
 	if url, ok = content["url"].(string); !ok {
 		return fmt.Errorf("url isn't a %T", url)
 	}
-	url = strings.Replace(url, "mxc://", b.GetString("Server")+"/_matrix/media/v1/download/", -1)
+	// https://github.com/matrix-org/matrix-spec-proposals/blob/main/proposals/3916-authentication-for-media.md
+	url = strings.Replace(url, "mxc://", b.GetString("Server")+"/_matrix/client/v1/media/download/", -1)
 
 	if info, ok = content["info"].(map[string]interface{}); !ok {
 		return fmt.Errorf("info isn't a %T", info)
@@ -606,7 +617,7 @@ func (b *Bmatrix) handleDownloadFile(rmsg *config.Message, content map[string]in
 		return err
 	}
 	// actually download the file
-	data, err := helper.DownloadFile(url)
+	data, err := helper.DownloadFileAuth(url, "Bearer "+b.mc.AccessToken)
 	if err != nil {
 		return fmt.Errorf("download %s failed %#v", url, err)
 	}
@@ -669,9 +680,23 @@ func (b *Bmatrix) handleUploadFile(msg *config.Message, channel string, fi *conf
 		}
 	case strings.Contains(mtype, "image"):
 		b.Log.Debugf("sendImage %s", res.ContentURI)
-		err = b.retry(func() error {
-			_, err = b.mc.SendImage(channel, fi.Name, res.ContentURI)
+		cfg, format, _ := image.DecodeConfig(bytes.NewReader(*fi.Data)) // optional prüfen
 
+		b.Log.Debugf("Image format detected: %s (%dx%d)", format, cfg.Width, cfg.Height)
+
+		img := matrix.ImageMessage{
+			MsgType: "m.image",
+			Body:    fi.Name,
+			URL:     res.ContentURI,
+			Info: matrix.ImageInfo{
+				Mimetype: mtype,
+				Size:     uint(len(*fi.Data)),
+				Width:    uint(cfg.Width),
+				Height:   uint(cfg.Height),
+			},
+		}
+		err = b.retry(func() error {
+			_, err = b.mc.SendMessageEvent(channel, "m.room.message", img)
 			return err
 		})
 		if err != nil {
